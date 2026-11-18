@@ -1,0 +1,87 @@
+// SPDX-License-Identifier: MIT
+#include <level_zero/ze_api.h>
+#include <pybind11/pybind11.h>
+#include <sycl/backend.hpp>
+#include <sycl/sycl.hpp>
+
+#include <cstdint>
+#include <cstring>
+#include <stdexcept>
+#include <string>
+
+namespace py           = pybind11;
+constexpr auto backend = sycl::backend::ext_oneapi_level_zero;
+
+static void check(ze_result_t result, const char* operation) {
+  if (result != ZE_RESULT_SUCCESS)
+    throw std::runtime_error(std::string(operation) + " failed with Level Zero status " +
+                             std::to_string(result));
+}
+
+static ze_ipc_mem_handle_t unpack(const std::string& bytes) {
+  ze_ipc_mem_handle_t handle;
+  if (bytes.size() != sizeof(handle))
+    throw std::invalid_argument("Invalid Level Zero IPC handle length");
+  std::memcpy(&handle, bytes.data(), sizeof(handle));
+  return handle;
+}
+
+// Use the SYCL context and device of the actual PyTorch stream. Level Zero
+// enumeration ordinals need not match torch.xpu ordinals under device filters.
+class LevelZeroIpc {
+  ze_context_handle_t context;
+  ze_device_handle_t device;
+
+ public:
+  explicit LevelZeroIpc(uintptr_t queue_ptr) {
+    const auto& queue = *reinterpret_cast<sycl::queue*>(queue_ptr);
+    context           = sycl::get_native<backend>(queue.get_context());
+    device            = sycl::get_native<backend>(queue.get_device());
+    uint32_t tiles    = 0;
+    check(zeDeviceGetSubDevices(device, &tiles, nullptr), "zeDeviceGetSubDevices");
+    if (tiles > 1)
+      throw std::runtime_error("Multi-tile IPC requires one XPU device per tile. "
+                               "Set ZE_FLAT_DEVICE_HIERARCHY=FLAT before launching the ranks.");
+  }
+
+  py::tuple export_heap(uintptr_t heap, size_t size) const {
+    void* base   = nullptr;
+    size_t bytes = 0;
+    check(zeMemGetAddressRange(context, reinterpret_cast<void*>(heap), &base, &bytes),
+          "zeMemGetAddressRange");
+    auto offset = heap - reinterpret_cast<uintptr_t>(base);
+    if (offset > bytes || size > bytes - offset)
+      throw std::runtime_error("Iris heap exceeds its Level Zero allocation");
+    ze_ipc_mem_handle_t handle{};
+    check(zeMemGetIpcHandle(context, base, &handle), "zeMemGetIpcHandle");
+    return py::make_tuple(py::bytes(reinterpret_cast<const char*>(&handle), sizeof(handle)),
+                          offset);
+  }
+
+  void release_export(const std::string& bytes) const {
+    check(zeMemPutIpcHandle(context, unpack(bytes)), "zeMemPutIpcHandle");
+  }
+
+  uintptr_t open(const std::string& bytes, int fd) const {
+    auto handle = unpack(bytes);
+    // Linux Intel GPU IPC handles carry a process-local FD in the first word.
+    std::memcpy(&handle, &fd, sizeof(fd));
+    void* mapped = nullptr;
+    check(zeMemOpenIpcHandle(context, device, handle, 0, &mapped), "zeMemOpenIpcHandle");
+    if (!mapped) throw std::runtime_error("zeMemOpenIpcHandle returned a null peer mapping");
+    return reinterpret_cast<uintptr_t>(mapped);
+  }
+
+  void close(uintptr_t base) const {
+    check(zeMemCloseIpcHandle(context, reinterpret_cast<void*>(base)), "zeMemCloseIpcHandle");
+  }
+};
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
+  py::class_<LevelZeroIpc>(module, "LevelZeroIpc")
+      .def(py::init<uintptr_t>())
+      .def("export_heap", &LevelZeroIpc::export_heap)
+      .def("release_export", &LevelZeroIpc::release_export)
+      .def("open", &LevelZeroIpc::open)
+      .def("close", &LevelZeroIpc::close);
+}

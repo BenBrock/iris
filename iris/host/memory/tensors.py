@@ -71,14 +71,11 @@ def is_valid_device(device, iris_device) -> bool:
 
     requested_device = torch.device(device) if isinstance(device, str) else device
 
-    # Both must be CUDA devices; index must match (or requested has no index)
-    if requested_device.type == "cuda" and iris_device.type == "cuda":
-        if requested_device.index is None:
-            return True
-        return requested_device.index == iris_device.index
-
-    # Non-CUDA devices are not supported
-    return False
+    return (
+        requested_device.type == iris_device.type
+        and iris_device.type in {"cuda", "xpu"}
+        and (requested_device.index is None or requested_device.index == iris_device.index)
+    )
 
 
 def throw_if_invalid_device(device, iris_device):

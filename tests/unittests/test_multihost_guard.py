@@ -43,6 +43,7 @@ def _fake_topology(hosts_and_domains):
 def heap_env(monkeypatch):
     """Fake everything SymmetricHeap.__init__ touches before the allocator exists."""
     monkeypatch.delenv("IRIS_ALLOCATOR", raising=False)
+    monkeypatch.setattr(symmetric_heap, "gpu_device_type", lambda: "cuda")
     monkeypatch.setattr(symmetric_heap, "is_simulation_env", lambda: False)
     monkeypatch.setattr(topology_module, "_fabric_failure", None)
     for name in ("TorchAllocator", "VMemAllocator", "VMemChunkedAllocator"):
@@ -67,6 +68,12 @@ def _heap(allocator_type, num_ranks=4):
 
 
 class TestSingleHostAllocators:
+    def test_xpu_requires_one_host(self, heap_env, monkeypatch):
+        monkeypatch.setattr(symmetric_heap, "gpu_device_type", lambda: "xpu")
+        heap_env(["host-a", "host-b"])
+        with pytest.raises(RuntimeError, match="XPU IPC requires all ranks on one host"):
+            _heap("torch", num_ranks=2)
+
     @pytest.mark.parametrize("allocator_type", ["torch", "vmem"])
     def test_multi_host_rejected_before_allocator(self, heap_env, allocator_type):
         heap_env(["tray-0", "tray-0", "tray-1", "tray-1"])

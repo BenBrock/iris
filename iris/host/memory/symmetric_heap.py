@@ -26,7 +26,8 @@ from iris.host.memory.allocators import TorchAllocator, VMemAllocator, VMemChunk
 from iris.drivers.base import MappingPlacement, PeerMapping
 from iris.host.distributed.fd_passing import setup_fd_infrastructure
 from iris.host.distributed.helpers import distributed_allgather
-from iris.host.platform.utils import is_simulation_env
+from iris.host.memory.allocators.xpu_allocator import XpuAllocator
+from iris.host.platform.utils import gpu_device_type, gpu_module, is_simulation_env
 
 logger = logging.getLogger("iris.host.memory.symmetric_heap")
 
@@ -230,6 +231,9 @@ class SymmetricHeap:
             num_ranks=num_ranks,
         )
 
+        xpu = gpu_device_type() == "xpu"
+        if xpu and (allocator_type != "torch" or is_simulation_env()):
+            raise ValueError("Intel XPU supports the torch allocator in hardware mode")
         if is_simulation_env():
             allocator_type = "torch"
 
@@ -264,11 +268,14 @@ class SymmetricHeap:
         if num_ranks > 1 and not is_simulation_env():
             hostnames = _hostnames_by_rank(num_ranks)
             multi_host = len(set(hostnames)) > 1
+            if xpu and multi_host:
+                raise RuntimeError("Intel XPU IPC requires all ranks on one host")
             if allocator_type in ("torch", "vmem"):
                 _require_single_host(allocator_type, hostnames)
 
         if allocator_type == "torch":
-            self.allocator = TorchAllocator(heap_size, device_id, cur_rank, num_ranks)
+            pool_allocator = XpuAllocator if xpu else TorchAllocator
+            self.allocator = pool_allocator(heap_size, device_id, cur_rank, num_ranks)
         elif allocator_type == "vmem":
             self.allocator = VMemAllocator(heap_size, device_id, cur_rank, num_ranks, rank_gpus=rank_gpus)
         elif allocator_type == "vmem_chunked":
@@ -312,6 +319,16 @@ class SymmetricHeap:
 
         self.fd_conns = setup_fd_infrastructure(cur_rank, num_ranks) if needs_fd_infra else None
         device = self.allocator.get_device()
+        self._peer_refresh_failed = False
+        if xpu:
+            # A fixed pool needs one IPC exchange for its entire lifetime. XPU
+            # addresses can use bit 63, including for the local torch data_ptr().
+            try:
+                self.heap_bases_cpu = self.allocator.map_heap(self.fd_conns)
+                self.heap_bases = torch.from_numpy(self.heap_bases_cpu).to(device)
+            finally:
+                self.close_fd_conns()
+            return
 
         # Use int64 instead of uint64 for gloo backend compatibility
         # Create from numpy array to avoid kernel issue (torch.zeros on small tensors triggers problematic kernel)
@@ -327,7 +344,6 @@ class SymmetricHeap:
         # This avoids GPU->CPU transfer on every translate() call
         self.heap_bases_cpu = self.heap_bases.cpu().numpy()
 
-        self._peer_refresh_failed = False
         self.refresh_peer_access()
 
     def close_fd_conns(self):
@@ -619,6 +635,9 @@ class SymmetricHeap:
 
         if dist.is_initialized():
             dist.barrier()
+
+        if isinstance(self.allocator, XpuAllocator):
+            return  # The entire pool was mapped at construction.
 
         my_base = self.allocator.get_base_address()
         # Use int64 instead of uint64 to avoid gloo issues with all_gather_object
@@ -1038,10 +1057,8 @@ class SymmetricHeap:
     def close(self):
         """Release resources held by the symmetric heap."""
         try:
-            import torch
-
-            if hasattr(self, "device_id"):
-                torch.cuda.synchronize(self.device_id)
+            if hasattr(self, "allocator"):
+                gpu_module().synchronize(self.device_id)
         except Exception:
             pass
 

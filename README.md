@@ -240,6 +240,7 @@ Check out our [examples](examples/) directory for ready-to-run scripts and usage
 Iris currently supports:
 
 - MI300X, MI350X & MI355X
+- Intel Data Center GPU Max 1550 for single-host Triton RMA and collectives. [Intel XPU setup](docs/getting-started/installation.md#intel-xpu)
 
 > [!NOTE]
 > Iris may work on other AMD GPUs with ROCm compatibility.

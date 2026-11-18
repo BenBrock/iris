@@ -45,6 +45,8 @@ class Tracing:
         Args:
             max_events (int): Maximum number of events to record. Default: 1,000,000
         """
+        if self.iris.get_device().type == "xpu":
+            raise NotImplementedError("Iris device tracing requires AMD GPU clock and topology intrinsics")
         self.enabled = True
         self.max_events = max_events
 

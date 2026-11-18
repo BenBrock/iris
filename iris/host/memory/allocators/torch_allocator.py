@@ -22,13 +22,15 @@ from iris.host.distributed.fd_passing import send_fd, recv_fd, managed_fd
 from iris.host.platform.utils import is_simulation_env
 
 
-class TorchAllocator(BaseAllocator):
+class TorchPoolAllocator(BaseAllocator):
     """
     PyTorch-based memory allocator using a pre-allocated memory pool.
 
     This allocator creates a single large torch.empty() buffer and
     manages sub-allocations within it using bump allocation.
     """
+
+    device_type = "cuda"
 
     def __init__(self, heap_size: int, device_id: int, cur_rank: int, num_ranks: int):
         """
@@ -42,7 +44,7 @@ class TorchAllocator(BaseAllocator):
         """
         super().__init__(heap_size, device_id, cur_rank, num_ranks)
 
-        self.device = f"cuda:{device_id}"
+        self.device = f"{self.device_type}:{device_id}"
         _log_rank(
             logging.INFO,
             "TorchAllocator: init heap_size=%.1fGB device=%d",
@@ -73,8 +75,6 @@ class TorchAllocator(BaseAllocator):
         else:
             self.rank_bools = None
             self.memory_pool = torch.empty(heap_size, device=self.device, dtype=torch.int8)
-
-        self._peer_ext_mem_handles: Dict[int, object] = {}
 
     def get_minimum_allocation_size(self) -> int:
         """Minimum allocation size in bytes (PyTorch allows 0-size views)."""
@@ -130,6 +130,60 @@ class TorchAllocator(BaseAllocator):
 
         sub_buffer = self.memory_pool[start : start + size_in_bytes].view(dtype)
         return sub_buffer.reshape((num_elements,))
+
+    def get_device(self) -> torch.device:
+        """Get the torch device."""
+        return self.memory_pool.device
+
+    def import_external_tensor(self, external_tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Place an external tensor's data on the symmetric heap by copying.
+
+        Unlike the VMem allocator, this does not share memory with the external
+        tensor: it allocates on the heap and copies. Subsequent changes to the
+        external tensor are not visible in the returned tensor.
+
+        Args:
+            external_tensor: External PyTorch tensor to copy from (must be on the same accelerator backend and contiguous)
+
+        Returns:
+            New tensor on the symmetric heap with the same data and shape.
+        """
+        if external_tensor.device.type != self.device_type:
+            raise RuntimeError(f"Can only import {self.device_type.upper()} tensors")
+        if not external_tensor.is_contiguous():
+            raise RuntimeError("Only contiguous tensors can be imported; call .contiguous() before as_symmetric()")
+        num_elements = external_tensor.numel()
+        dtype = external_tensor.dtype
+        shape = external_tensor.shape
+        heap_tensor = self.allocate(num_elements, dtype)
+        heap_tensor = heap_tensor.reshape(shape).copy_(external_tensor)
+        return heap_tensor
+
+    def owns_tensor(self, tensor: torch.Tensor) -> bool:
+        """
+        Check if a tensor is within the allocator's managed heap.
+
+        Args:
+            tensor: PyTorch tensor to check
+
+        Returns:
+            True if tensor is within the heap, False otherwise
+        """
+        if tensor.numel() == 0:
+            return True
+
+        ptr = int(tensor.data_ptr())
+        heap_base = self.get_base_address()
+        return ptr >= heap_base and ptr < heap_base + self.heap_size
+
+
+class TorchAllocator(TorchPoolAllocator):
+    """Fixed CUDA/ROCm torch pool with DMA-BUF peer mappings."""
+
+    def __init__(self, heap_size: int, device_id: int, cur_rank: int, num_ranks: int):
+        super().__init__(heap_size, device_id, cur_rank, num_ranks)
+        self._peer_ext_mem_handles: Dict[int, object] = {}
 
     def get_shareable_handle(self) -> tuple:
         """
@@ -196,49 +250,3 @@ class TorchAllocator(BaseAllocator):
             except Exception:
                 pass
         self._peer_ext_mem_handles.clear()
-
-    def get_device(self) -> torch.device:
-        """Get the torch device."""
-        return self.memory_pool.device
-
-    def import_external_tensor(self, external_tensor: torch.Tensor) -> torch.Tensor:
-        """
-        Place an external tensor's data on the symmetric heap by copying.
-
-        Unlike the VMem allocator, this does not share memory with the external
-        tensor: it allocates on the heap and copies. Subsequent changes to the
-        external tensor are not visible in the returned tensor.
-
-        Args:
-            external_tensor: External PyTorch tensor to copy from (must be CUDA, contiguous)
-
-        Returns:
-            New tensor on the symmetric heap with the same data and shape.
-        """
-        if not external_tensor.is_cuda:
-            raise RuntimeError("Can only import CUDA tensors")
-        if not external_tensor.is_contiguous():
-            raise RuntimeError("Only contiguous tensors can be imported; call .contiguous() before as_symmetric()")
-        num_elements = external_tensor.numel()
-        dtype = external_tensor.dtype
-        shape = external_tensor.shape
-        heap_tensor = self.allocate(num_elements, dtype)
-        heap_tensor = heap_tensor.reshape(shape).copy_(external_tensor)
-        return heap_tensor
-
-    def owns_tensor(self, tensor: torch.Tensor) -> bool:
-        """
-        Check if a tensor is within the allocator's managed heap.
-
-        Args:
-            tensor: PyTorch tensor to check
-
-        Returns:
-            True if tensor is within the heap, False otherwise
-        """
-        if tensor.numel() == 0:
-            return True
-
-        ptr = int(tensor.data_ptr())
-        heap_base = self.get_base_address()
-        return ptr >= heap_base and ptr < heap_base + self.heap_size

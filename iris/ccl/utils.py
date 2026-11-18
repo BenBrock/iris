@@ -8,8 +8,14 @@ Utility functions and enums for iris-ccl collective operations.
 from enum import IntEnum
 from typing import Tuple
 import triton
+from iris.host.platform.utils import gpu_device_type
 import triton.language as tl
 from iris.host.distributed.helpers import extract_group_info as _extract_group_info
+
+
+def waves_per_eu_option(waves):
+    """The Intel Triton backend has no AMD wave occupancy option."""
+    return {} if gpu_device_type() == "xpu" else {"waves_per_eu": waves}
 
 
 @triton.jit()

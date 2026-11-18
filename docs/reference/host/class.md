@@ -10,7 +10,7 @@ Prefer using the convenience factory over calling the constructor directly:
 
 ## Device Placement
 
-By default each rank runs on GPU `rank % torch.cuda.device_count()`, and Iris
+By default each rank runs on GPU `rank % visible_device_count`, and Iris
 makes it the current device. If your launcher puts ranks on other GPUs,
 for example ranks 0-1 on GPUs 2-3, pass the GPU explicitly. It must be the
 device the process group was initialized with, because Iris runs its
@@ -27,7 +27,11 @@ means the current device, so set it with `torch.cuda.set_device` first. If the
 process group was initialized with `device_id`, Iris raises `ValueError` when
 the GPU it would use, whether from `device` or the default, is a different one.
 
-Ranks find each other's GPUs by PCI address, so processes may see the GPUs in a
+On Intel XPU, use `"xpu"` for the current device or `"xpu:N"` for a specific device. The
+fixed torch heap uses Level Zero IPC to map the participating devices on one host.
+[Installation and placement example](../../getting-started/installation.md#intel-xpu)
+
+On ROCm, ranks find each other's GPUs by PCI address, so processes may see the GPUs in a
 different order (different `HIP_VISIBLE_DEVICES`). The `vmem` allocator and the
 SDMA copy engine map peers' memory onto GPUs on this host, so each process must
 be able to see every rank's GPU. Both are single-host: in a job that spans hosts,

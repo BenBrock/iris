@@ -87,7 +87,6 @@ from iris.host.memory.tensor_utils import (
 
 from iris.host.platform import hip
 from . import experimental
-from . import ops
 from iris.host.memory import tensors as tensor_creation
 from . import bench
 from iris.host.tracing import kernel_artifacts  # noqa: F401  # triggers _init() at import time
@@ -99,6 +98,16 @@ from iris.host.logging.logging import (
     WARNING,
     ERROR,
 )
+
+
+def __getattr__(name):
+    if name == "ops":
+        # Fused GEMMs depend on tritonBLAS. Core RMA also runs on XPU-only installs.
+        from importlib import import_module
+
+        return import_module(".ops", __name__)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "Iris",

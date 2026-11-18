@@ -71,3 +71,6 @@ ignore = ["E501", "E701", "E731", "E741", "F841"]
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.setuptools.package-data]
+"iris.drivers.local" = ["level_zero.sycl"]

@@ -9,6 +9,7 @@ from triton.language.core import _aggregate as aggregate
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 import triton.language as tl
+from iris.mem.utils import supports_atomic_add
 from iris.mem.gluon.tracing import Tracing
 
 
@@ -394,6 +395,10 @@ class Context:
             >>> old_val = ctx.atomic_add(buffer, 5, 1)
         """
         translated_ptr = self._translate(pointer, self.cur_rank, to_rank)
+        gl.static_assert(
+            supports_atomic_add(translated_ptr.dtype.element_ty),
+            "Use FP32 for BF16 atomic accumulation on Intel Data Center GPU Max",
+        )
         return gl.atomic_add(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
     @gluon.jit
@@ -416,8 +421,7 @@ class Context:
             >>> # Atomically subtract from rank 1's memory
             >>> old_val = ctx.atomic_sub(buffer, 3, 1)
         """
-        translated_ptr = self._translate(pointer, self.cur_rank, to_rank)
-        return gl.atomic_sub(translated_ptr, val, mask=mask, sem=sem, scope=scope)
+        return self.atomic_add(pointer, -val, to_rank, mask=mask, sem=sem, scope=scope)
 
     @gluon.jit
     def atomic_cas(self, pointer, cmp, val, to_rank, sem=None, scope=None):

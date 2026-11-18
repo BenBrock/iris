@@ -6,6 +6,7 @@ import triton
 import triton.language as tl
 import pytest
 import iris
+from iris.mem.utils import supports_atomic_add
 
 
 @triton.jit
@@ -76,6 +77,8 @@ def atomic_add_kernel(
     ],
 )
 def test_atomic_add_api(dtype, sem, scope, BLOCK_SIZE):
+    if dtype == torch.bfloat16 and not supports_atomic_add(triton.language.bfloat16):
+        pytest.skip("BF16 atomic add on Intel Data Center GPU Max")
     # TODO: Adjust heap size.
     shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
@@ -91,7 +94,7 @@ def test_atomic_add_api(dtype, sem, scope, BLOCK_SIZE):
     shmem.barrier()
 
     # Verify the results
-    expected = torch.ones(BLOCK_SIZE, dtype=dtype, device="cuda") * num_ranks
+    expected = torch.ones(BLOCK_SIZE, dtype=dtype, device=results.device) * num_ranks
 
     try:
         torch.testing.assert_close(results, expected, rtol=0, atol=0)

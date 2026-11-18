@@ -29,6 +29,15 @@ import math
 import torch
 
 
+def gpu_device_type() -> str:
+    """PyTorch device type for this build, without initializing a GPU at import time."""
+    return "xpu" if getattr(torch.version, "xpu", None) else "cuda"
+
+
+def gpu_module():
+    return getattr(torch, gpu_device_type())
+
+
 def is_simulation_env() -> bool:
     """
     Return True if running in a simulation environment (e.g. pre-silicon).
@@ -89,7 +98,7 @@ def get_device_id_for_rank(local_rank: int) -> int:
 
 def get_empty_cache_for_benchmark():
     cache_size = 256 * 1024 * 1024
-    return torch.empty(int(cache_size // 4), dtype=torch.int, device="cuda")
+    return torch.empty(int(cache_size // 4), dtype=torch.int, device=gpu_device_type())
 
 
 def clear_cache(cache):
@@ -97,7 +106,7 @@ def clear_cache(cache):
 
 
 def create_timing_event():
-    return torch.cuda.Event(enable_timing=True)
+    return gpu_module().Event(enable_timing=True)
 
 
 def _quantile(a, q):

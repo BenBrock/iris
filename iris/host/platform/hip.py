@@ -14,13 +14,12 @@ from iris.host.platform.libs import load_vendor_library
 
 # Auto-detect backend
 _is_amd_backend = True
-gpu_runtime = load_vendor_library("libamdhip64", "libamdhip64.so")
-if gpu_runtime is None:
-    try:
+gpu_runtime = None
+if not getattr(torch.version, "xpu", None):
+    gpu_runtime = load_vendor_library("libamdhip64", "libamdhip64.so")
+    if gpu_runtime is None:
         gpu_runtime = ctypes.cdll.LoadLibrary("libcudart.so")
         _is_amd_backend = False
-    except OSError:
-        gpu_runtime = ctypes.cdll.LoadLibrary("libamdhip64.so")
 
 
 def gpu_try(err):
