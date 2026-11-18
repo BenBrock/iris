@@ -7,6 +7,7 @@ Triton device-side context for Iris RMA operations.
 
 import triton
 import triton.language as tl
+from iris.mem.utils import supports_atomic_add
 from triton.language.core import _aggregate as aggregate
 from iris.mem.utils import get_xcc_id, get_cu_id, read_realtime  # noqa: F401 — used by Tracing
 from iris.mem.triton.tracing import Tracing
@@ -491,6 +492,10 @@ class Context:
             >>> old_val = ctx.atomic_add(counter, 1, to_rank=1)
         """
         translated_ptr = self._translate(pointer, self.rank, to_rank, hint)
+        tl.static_assert(
+            supports_atomic_add(translated_ptr.dtype.element_ty),
+            "Use FP32 for BF16 atomic accumulation on Intel Data Center GPU Max",
+        )
         return tl.atomic_add(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
     @triton.jit
@@ -514,8 +519,7 @@ class Context:
         Returns:
             Block: The data stored at pointer before the atomic operation.
         """
-        translated_ptr = self._translate(pointer, self.rank, to_rank, hint)
-        return tl.atomic_sub(translated_ptr, val, mask=mask, sem=sem, scope=scope)
+        return self.atomic_add(pointer, -val, to_rank, mask=mask, sem=sem, scope=scope, hint=hint)
 
     @triton.jit
     def atomic_cas(self, pointer, cmp, val, to_rank, sem=None, scope=None, hint: tl.constexpr = None):

@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
-from ..utils import chiplet_transform_chunked
+from ..utils import chiplet_transform_chunked, waves_per_eu_option
 
 
 @triton.jit()
@@ -185,7 +185,7 @@ def launch(
         distribution,
         num_stages=config.num_stages,
         num_warps=config.num_warps,
-        waves_per_eu=config.waves_per_eu,
+        **waves_per_eu_option(config.waves_per_eu),
         algorithm="reduce_scatter",
         rank=rank_global,
         dtype=input_tensor.dtype,

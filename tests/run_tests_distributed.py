@@ -66,14 +66,15 @@ def _run_pytest_worker(pytest_args: list[str]) -> int:
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
 
-    if torch.cuda.is_available():
-        torch.cuda.set_device(local_rank)
+    device_type = "xpu" if getattr(torch.version, "xpu", None) else "cuda"
+    device = torch.device(device_type, local_rank)
+    getattr(torch, device_type).set_device(device)
 
     dist.init_process_group(
-        backend="nccl",
+        backend="xccl" if device_type == "xpu" else "nccl",
         rank=rank,
         world_size=world_size,
-        device_id=torch.device(f"cuda:{local_rank}") if torch.cuda.is_available() else None,
+        device_id=device,
     )
 
     try:

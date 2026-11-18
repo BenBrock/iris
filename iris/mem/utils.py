@@ -11,10 +11,21 @@ architecture-aware APIs (``tl.extra.hip``) where available.
 
 import triton
 import triton.language as tl
-from triton.language.target_info import is_hip_cdna3, is_hip_cdna4
+from triton.language.target_info import current_target, is_hip_cdna3, is_hip_cdna4
 
 # Ticks per second of the constant-frequency clock read_realtime() returns
 REALTIME_HZ = 100_000_000
+
+
+@triton.constexpr_function
+def supports_atomic_add(dtype):
+    # Intel Triton on Ponte Vecchio can execute a BF16 atomic add as FP16,
+    # silently changing the value. Other dtypes use the normal Triton path.
+    if dtype != tl.bfloat16:
+        return True
+    target = current_target()
+    return target is None or target.backend != "xpu" or target.arch["arch"] != "pvc"
+
 
 # Probe each intrinsic separately. They were added to
 # ``triton.language.extra.hip`` at different times, so a build can export one

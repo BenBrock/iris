@@ -63,7 +63,7 @@ def test_allocate_symmetric_returns_peer_bases():
 
         assert peer_bases.numel() == ctx.get_num_ranks()
         assert peer_bases.dtype in (torch.int64, torch.uint64)
-        assert peer_bases.is_cuda
+        assert peer_bases.device == ctx.get_device()
 
         # Entries are the address of THIS tensor on each rank, so our own
         # entry is our own data_ptr -- that is the base translation subtracts.

@@ -66,7 +66,7 @@ def test_load_api(dtype, BLOCK_SIZE):
     shmem.barrier()
 
     # Verify the result
-    expected = torch.ones(BLOCK_SIZE, dtype=dtype, device="cuda") * partner
+    expected = torch.ones(BLOCK_SIZE, dtype=dtype, device=shmem.get_device()) * partner
 
     try:
         torch.testing.assert_close(results, expected, rtol=0, atol=0)

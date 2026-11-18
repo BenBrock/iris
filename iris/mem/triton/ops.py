@@ -9,6 +9,7 @@ These are the module-level functional API. For the OO API, see DeviceContext.
 
 import triton
 import triton.language as tl
+from iris.mem.utils import supports_atomic_add
 from iris.mem.triton.context import __translate
 from iris.device import sdma_utils
 
@@ -541,6 +542,10 @@ def atomic_add(
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases, hint)
     if not use_copy_engine:
+        tl.static_assert(
+            supports_atomic_add(translated_ptr.dtype.element_ty),
+            "Use FP32 for BF16 atomic accumulation on Intel Data Center GPU Max",
+        )
         return tl.atomic_add(translated_ptr, val, mask=mask, sem=sem, scope=scope)
     else:
         handle = copy_engine_ctx + (sdma_utils.sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
@@ -615,8 +620,7 @@ def atomic_sub(
         >>>     decrement = 3
         >>>     old_val = iris.atomic_sub(ptr, decrement, cur_rank, remote_rank, heap_bases)
     """
-    translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases, hint)
-    return tl.atomic_sub(translated_ptr, val, mask=mask, sem=sem, scope=scope)
+    return atomic_add(pointer, -val, from_rank, to_rank, heap_bases, mask=mask, sem=sem, scope=scope, hint=hint)
 
 
 @triton.jit

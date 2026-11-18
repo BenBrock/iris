@@ -51,11 +51,7 @@ from iris.host.distributed.helpers import (
     distributed_broadcast_scalar,
     distributed_broadcast_tensor,
 )
-from iris.host.platform.hip import (
-    set_device,
-    get_cu_count,
-    count_devices,
-)
+from iris.host.platform.hip import get_cu_count
 
 from iris.host.memory.symmetric_heap import SymmetricHeap
 from iris.host import queue_ledger
@@ -73,7 +69,7 @@ from iris.mem.triton.tracing import Tracing as DeviceTracing  # noqa: F401
 
 # Import shared tensor-creation helpers
 from iris.host.memory import tensors as tensor_creation
-from iris.host.platform.utils import is_simulation_env
+from iris.host.platform.utils import gpu_device_type, gpu_module, is_simulation_env
 
 _SUPPORTED_ENGINES = frozenset({"sdma"})
 
@@ -88,9 +84,9 @@ def _resolve_gpu_id(device, cur_rank, num_gpus):
         device = int(device)
     else:
         device = torch.device(device)
-        if device.type != "cuda":
+        if device.type != gpu_device_type():
             raise ValueError(f"Iris needs a GPU device, got {device}")
-        device = torch.cuda.current_device() if device.index is None else device.index
+        device = gpu_module().current_device() if device.index is None else device.index
     if not 0 <= device < num_gpus:
         raise ValueError(f"GPU {device} is not one of the {num_gpus} visible GPUs")
     return device
@@ -141,8 +137,8 @@ class Iris:
             ``("sdma",)`` for host- and device-initiated SDMA operations (needs
             ``pip install iris[sdma]``). Defaults to ``()`` (none).
         device (int, str or torch.device, optional): GPU this rank runs on, as an index
-            into the visible GPUs, ``"cuda:N"``, or a ``torch.device``; ``"cuda"`` uses the
-            current device, so call ``torch.cuda.set_device`` first. ``None`` (default) uses
+            into the visible GPUs, a device string such as ``"xpu:0"`` or ``"cuda:0"``, or a
+            ``torch.device``. A device without an index uses the current GPU. ``None`` (default) uses
             ``rank % visible GPUs``. It must be the GPU the process group is bound to; if the
             group was initialized with ``device_id``, a different GPU raises ``ValueError``.
 
@@ -166,6 +162,9 @@ class Iris:
         unsupported = set(engines) - _SUPPORTED_ENGINES
         if unsupported:
             raise ValueError(f"Unsupported engines: {sorted(unsupported)}. Supported: {sorted(_SUPPORTED_ENGINES)}.")
+        device_type = gpu_device_type()
+        if device_type == "xpu" and "sdma" in engines:
+            raise ValueError("The SDMA engine requires AMD GPUs")
         self._sdma_ep = None
         if "sdma" in engines:
             from iris.device.sdma_utils import bind_sdma_ep
@@ -174,11 +173,13 @@ class Iris:
 
         # Initialize distributed environment
         comm, cur_rank, num_ranks = init_distributed()
-        num_gpus = count_devices()
+        num_gpus = gpu_module().device_count()
+        if not num_gpus:
+            raise RuntimeError(f"No visible {device_type} devices")
 
         gpu_id = _resolve_gpu_id(device, cur_rank, num_gpus)
         require_process_group_device(gpu_id, device_given=device is not None)
-        set_device(gpu_id)
+        gpu_module().set_device(gpu_id)
 
         self.comm = comm
         self.num_ranks = num_ranks
@@ -212,7 +213,7 @@ class Iris:
             reserved_bytes=internal_reservations,
             rank_gpus=rank_gpus,
         )
-        self.device = f"cuda:{gpu_id}"
+        self.device = str(self.heap.get_device())
         self.heap_bases = self.heap.get_heap_bases()
 
         if is_simulation_env():
@@ -1472,8 +1473,8 @@ class Iris:
                 default dtype.
 
         Returns:
-            tuple[torch.Tensor, torch.Tensor]: The tensor, uninitialized, and an
-            ``int64[world_size]`` device-resident table whose entry ``r`` is the
+            tuple[torch.Tensor, torch.Tensor]: The tensor, uninitialized, and a
+            64-bit device-resident table indexed by rank whose entry ``r`` is the
             address of *this tensor* on rank ``r``. ``peer_bases[cur_rank]`` is
             the tensor's own ``data_ptr()``, which is the base device-side
             translation subtracts.
@@ -1494,11 +1495,13 @@ class Iris:
         # guarantee, not an assumption made here -- but the arithmetic below
         # reads like generic pointer math without it.
         #
-        # Kept entirely on device: heap_bases[cur_rank] stays a tensor rather
-        # than going through .item(), so this costs one vector-add and no
-        # device-to-host sync on the allocation path.
-        heap_offset = tensor.data_ptr() - self.heap_bases[self.cur_rank]
-        return tensor, self.heap_bases + heap_offset
+        # Calculate the offset from host pointers, then add on device. Use signed
+        # arithmetic on the bit pattern because XPU pointers can exceed INT64_MAX.
+        if tensor.numel() == 0:
+            return tensor, torch.zeros_like(self.heap_bases)
+        heap_offset = tensor.data_ptr() - self.heap.allocator.get_base_address()
+        bases = self.heap_bases.view(torch.int64) + heap_offset
+        return tensor, bases.view(self.heap_bases.dtype)
 
     def _build_device_context(self):
         """
@@ -1507,7 +1510,7 @@ class Iris:
         Called during __init__ and again after tracing.enable() to include tracing fields.
         """
         # Convert heap_bases to a list for concatenation
-        heap_bases_list = self.heap_bases.tolist()
+        heap_bases_list = self.heap_bases.view(torch.int64).tolist()
 
         # Create context tensor: [cur_rank, world_size, heap_base_0, heap_base_1, ...]
         context_data = [self.cur_rank, self.num_ranks] + heap_bases_list
@@ -1593,7 +1596,7 @@ class Iris:
         self._log_with_rank(logging.DEBUG, "barrier: start")
         # Wait for all GPUs to finish work
         if stream is None:
-            torch.cuda.synchronize()
+            gpu_module().synchronize(self.gpu_id)
         else:
             stream.synchronize()
 
@@ -1632,7 +1635,7 @@ class Iris:
         Get the underlying device where the Iris symmetric heap resides.
 
         Returns:
-            torch.device: The CUDA device of Iris-managed memory.
+            torch.device: The GPU holding this rank’s Iris-managed memory.
 
         Example:
             >>> ctx = iris.iris(1 << 20)
@@ -1685,6 +1688,8 @@ class Iris:
             >>> cu_count = ctx.get_cu_count()
             >>> print(f"GPU has {cu_count} CUs")  # GPU has 304 CUs
         """
+        if self.get_device().type == "xpu":
+            return torch.xpu.get_device_properties(self.gpu_id).max_compute_units
         return get_cu_count(self.gpu_id)
 
     def get_device_id(self):

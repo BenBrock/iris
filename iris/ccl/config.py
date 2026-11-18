@@ -7,6 +7,7 @@ Configuration structures for iris-ccl collective operations.
 
 from dataclasses import dataclass
 import iris
+from iris.host.platform.utils import gpu_device_type
 
 
 @dataclass
@@ -129,7 +130,7 @@ class Config:
     def __post_init__(self):
         """Validate and auto-detect num_xcds if not set."""
         if self.num_xcds is None:
-            self.num_xcds = iris.hip.get_num_xcc()
+            self.num_xcds = 1 if gpu_device_type() == "xpu" else iris.hip.get_num_xcc()
 
         if self.chunk_size is None:
             self.chunk_size = self.swizzle_size * self.swizzle_size

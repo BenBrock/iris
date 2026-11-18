@@ -188,7 +188,7 @@ def test_arange_pytorch_equivalence():
 
     # Test basic equivalence
     iris_result = shmem.arange(5)
-    pytorch_result = torch.arange(5, device="cuda")
+    pytorch_result = torch.arange(5, device=shmem.get_device())
 
     assert iris_result.shape == pytorch_result.shape
     assert iris_result.dtype == pytorch_result.dtype
@@ -196,7 +196,7 @@ def test_arange_pytorch_equivalence():
 
     # Test with start, end, step
     iris_result = shmem.arange(1, 4, 0.5)
-    pytorch_result = torch.arange(1, 4, 0.5, device="cuda")
+    pytorch_result = torch.arange(1, 4, 0.5, device=shmem.get_device())
 
     assert iris_result.shape == pytorch_result.shape
     assert iris_result.dtype == pytorch_result.dtype
@@ -204,7 +204,7 @@ def test_arange_pytorch_equivalence():
 
     # Test dtype inference equivalence
     iris_result = shmem.arange(1.0, 3.0)
-    pytorch_result = torch.arange(1.0, 3.0, device="cuda")
+    pytorch_result = torch.arange(1.0, 3.0, device=shmem.get_device())
 
     assert iris_result.dtype == pytorch_result.dtype
     assert torch.allclose(iris_result, pytorch_result)
@@ -233,7 +233,7 @@ def test_arange_parameter_combinations(params):
 
     # Verify values match PyTorch
     pytorch_result = torch.arange(
-        start=params["start"], end=params["end"], step=params["step"], dtype=params["dtype"], device="cuda"
+        start=params["start"], end=params["end"], step=params["step"], dtype=params["dtype"], device=shmem.get_device()
     )
 
     assert result.shape == pytorch_result.shape
@@ -257,7 +257,7 @@ def test_arange_parameter_combinations(params):
     [
         {},  # No kwargs
         {"dtype": torch.float64},  # dtype override
-        {"device": "cuda:0"},  # device override (will be replaced with actual Iris device)
+        {"device": None},  # exercise explicit placement on the Iris device
         {"dtype": torch.float32, "requires_grad": True},  # requires_grad True with float dtype
         {"layout": torch.strided},  # strided layout
     ],
@@ -266,9 +266,8 @@ def test_arange_symmetric_heap_verification(arange_args, kwargs):
     """Test that all arange results are on the symmetric heap."""
     shmem = iris.iris(1 << 20)
 
-    # Replace hardcoded device with actual Iris device
-    if "device" in kwargs and kwargs["device"] == "cuda:0":
-        kwargs["device"] = str(shmem.get_device())
+    if "device" in kwargs:
+        kwargs = dict(kwargs, device=shmem.get_device())
 
     # Call arange with the given arguments and kwargs
     result = shmem.arange(*arange_args, **kwargs)
@@ -278,7 +277,4 @@ def test_arange_symmetric_heap_verification(arange_args, kwargs):
         f"Tensor {result} with args={arange_args}, kwargs={kwargs} is not on symmetric heap"
     )
 
-    # Verify CUDA device
-    assert result.device.type == "cuda", (
-        f"Tensor {result} with args={arange_args}, kwargs={kwargs} is not on CUDA device"
-    )
+    assert result.device == shmem.get_device()

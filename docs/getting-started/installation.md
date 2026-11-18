@@ -4,7 +4,7 @@ This guide covers how to install Iris on your system using various methods.
 
 ## Overview
 
-Iris has minimal dependencies including Python, PyTorch, ROCm HIP runtime, and Triton. This guide will walk you through the installation process using different approaches.
+Iris uses PyTorch and Triton. For AMD GPUs, use the ROCm prerequisites below. For Intel GPUs, see [Intel XPU](#intel-xpu).
 
 ## Prerequisites
 
@@ -93,6 +93,56 @@ For HPC environments or systems where Docker is not available:
 pip install -e .
 ```
 
+
+## Intel XPU
+
+Iris supports a fixed symmetric heap on peer-accessible Intel GPUs in one Linux host.
+The backend uses the PyTorch XPU stream’s Level Zero context to export and open IPC
+handles. Iris exchanges the Linux file descriptors over Unix sockets and keeps the
+peer mappings alive for the lifetime of the heap.
+
+The tested stack is Intel Data Center GPU Max 1550, PyTorch 2.13.0+xpu, and
+triton-xpu 3.7.2. Install a matching XPU build of PyTorch and Triton, the Intel
+oneAPI DPC++ compiler (`icpx`), and the Level Zero development headers and loader.
+Activate the compiler environment in the shell used to launch all ranks. The first
+multi-rank initialization builds a small SYCL extension in PyTorch’s extension cache.
+
+From the checkout, install the core RMA dependencies into that environment and run
+the hardware tests.
+
+```bash
+python -m pip install numpy requests ninja pytest
+python -m pip install --no-deps -e .
+export ZE_FLAT_DEVICE_HIERARCHY=FLAT
+python tests/run_tests_distributed.py tests/unittests/test_xpu_backend.py --num_ranks 2 -v
+```
+
+On multi-tile GPUs, flat device enumeration exposes each tile as an XPU device.
+Launch one rank per participating device with `torchrun`. Initialize a process
+group before constructing Iris. XCCL and Gloo can both coordinate the ranks.
+
+```python
+import os
+import torch
+import torch.distributed as dist
+import iris
+
+device = torch.device("xpu", int(os.environ["LOCAL_RANK"]))
+torch.xpu.set_device(device)
+dist.init_process_group("xccl", device_id=device)
+ctx = iris.Iris(1 << 20, device=device)
+src = ctx.full((32, 64), ctx.get_rank() + 1, dtype=torch.float32)
+dst = ctx.zeros_like(src)
+ctx.barrier()
+ctx.ccl.all_reduce(dst, src)
+ctx.barrier()
+dist.destroy_process_group()
+```
+
+Use `allocator_type="torch"` (the default) for Triton RMA, remote atomics, and
+Triton collectives. Use FP32 accumulators for BF16 atomic addition on GPU Max.
+The VMem allocators, AMD SDMA engine, hardware tracing,
+and tritonBLAS fused GEMMs are outside the Intel backend’s supported features.
 
 ## Optional: SDMA copy engine
 

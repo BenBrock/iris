@@ -65,11 +65,13 @@ def _infer_device():
         backend = "gloo"
     if backend == "nccl" and torch.cuda.is_available():
         return torch.device("cuda", torch.cuda.current_device())
+    if backend == "xccl":
+        return torch.device("xpu", torch.xpu.current_device())
     return torch.device("cpu")
 
 
-def _nccl_dtype_supported(t: torch.Tensor) -> bool:
-    """Conservative whitelist for NCCL tensor dtypes."""
+def _gpu_collective_dtype_supported(t: torch.Tensor) -> bool:
+    """Tensor dtypes used with NCCL and XCCL."""
     supported = {
         torch.int8,
         torch.uint8,
@@ -114,11 +116,10 @@ def distributed_allgather(data):
         num_ranks=world_size,
     )
 
-    # Fast path: tensor all_gather if dtype is NCCL-supported or backend != nccl
     data_tensor = torch.from_numpy(data)
     # Gloo doesn't support uint64, so use object collective for uint64 with gloo
     # For int64 with gloo, we can use tensor collective (gloo supports int64)
-    use_tensor_collective = (backend != "nccl" or _nccl_dtype_supported(data_tensor)) and not (
+    use_tensor_collective = (backend not in ("nccl", "xccl") or _gpu_collective_dtype_supported(data_tensor)) and not (
         backend == "gloo" and data_tensor.dtype == torch.uint64
     )
 
@@ -131,7 +132,7 @@ def distributed_allgather(data):
         result = cpu_tensor.numpy()
         return result
     else:
-        # Fallback for NCCL-unsupported dtypes or gloo with uint64 (e.g., uint64/bool/etc.)
+        # Use the object collective for unsupported tensor dtypes.
         obj_list = [None for _ in range(world_size)]
         # Use object collective (works across backends)
         dist.all_gather_object(obj_list, data)
@@ -194,21 +195,17 @@ def distributed_broadcast_scalar(value=None, root=0):
     dist.broadcast_object_list(dtype_obj, src=root)
     dtype = dtype_obj[0]
 
-    # If NCCL can't handle this dtype, just broadcast the object directly.
-    if backend == "nccl":
-        # Try a quick check using a tiny tensor of the dtype
-        try:
-            torch_dtype = torch.from_numpy(np.array(0, dtype=dtype)).dtype
-            dummy = torch.empty((), dtype=torch_dtype)
-            if not _nccl_dtype_supported(dummy):
-                obj = [value if rank == root else None]
-                dist.broadcast_object_list(obj, src=root)
-                return obj[0]
-        except (TypeError, ValueError):
-            # Dtype not supported by torch (e.g., str, object), use object broadcast
-            obj = [value if rank == root else None]
-            dist.broadcast_object_list(obj, src=root)
-            return obj[0]
+    # Some Python scalars (including strings and dictionaries) have no
+    # corresponding torch dtype and must travel through an object collective.
+    try:
+        sample = torch.from_numpy(np.empty((), dtype=dtype))
+        tensor_supported = backend not in ("nccl", "xccl") or _gpu_collective_dtype_supported(sample)
+    except (TypeError, ValueError):
+        tensor_supported = False
+    if not tensor_supported:
+        obj = [value if rank == root else None]
+        dist.broadcast_object_list(obj, src=root)
+        return obj[0]
 
     # Tensor path: create a 0-D tensor, broadcast on the selected device
     if rank != root:
@@ -259,7 +256,7 @@ def distributed_broadcast_tensor(value_to_broadcast=None, root=0):
     if rank != root:
         tensor = torch.empty(shape, dtype=dtype)
 
-    use_tensor_collective = backend != "nccl" or _nccl_dtype_supported(tensor)
+    use_tensor_collective = backend not in ("nccl", "xccl") or _gpu_collective_dtype_supported(tensor)
 
     if use_tensor_collective:
         tensor = tensor.to(device)

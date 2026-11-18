@@ -14,7 +14,7 @@ import triton.language as tl
 import torch
 import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
-from ..utils import chiplet_transform_chunked
+from ..utils import chiplet_transform_chunked, waves_per_eu_option
 
 # Variant types
 VARIANT_ATOMIC = "atomic"
@@ -922,7 +922,7 @@ def launch(
             config.all_reduce_distribution,
             num_warps=8,
             num_stages=1,
-            waves_per_eu=1,
+            **waves_per_eu_option(1),
             algorithm="all_reduce",
             rank=rank_global,
             dtype=input_tensor.dtype,
